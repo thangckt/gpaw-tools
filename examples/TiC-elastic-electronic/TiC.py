@@ -22,6 +22,7 @@ Fix_symmetry = False    # True for preserving the spacegroup symmetry during opt
 # Which components of strain will be relaxed: EpsX, EpsY, EpsZ, ShearYZ, ShearXZ, ShearXY
 # Example: For a x-y 2D nanosheet only first 2 component will be true
 Relax_cell = [True, True, True, False, False, False]
+Hydrostatic_pressure=0.0 #GPa
 
 # ELECTRONIC
 Cut_off_energy = 600 	# eV
@@ -47,6 +48,7 @@ DOS_convergence = {}  # Convergence items for DOS calculations
 Spin_calc = False        # Spin polarized calculation?
 Magmom_per_atom = 1.0    # Magnetic moment per atom
 Refine_grid = 4             # refine grid for all electron density (1, 2 [=default] and 4)
+Total_charge = 0.0       # Total charge. Normally 0.0 for a neutral system.
 
 #GENERAL
 MPI_cores = 4            # Number of cores in calculation.

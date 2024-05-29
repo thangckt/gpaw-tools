@@ -25,6 +25,7 @@ Fix_symmetry = True    # True for preserving the spacegroup symmetry during opti
 # Which components of strain will be relaxed: EpsX, EpsY, EpsZ, ShearYZ, ShearXZ, ShearXY
 # Example: For a x-y 2D nanosheet only first 2 component will be true
 Relax_cell=[True, True, True, False, False, False]
+Hydrostatic_pressure=0.0 #GPa
 
 # ELECTRONIC
 Cut_off_energy = 700 	# eV
@@ -36,6 +37,7 @@ Gamma = True
 Band_path = 'LGXWK'	    # Brillouin zone high symmetry points
 Band_npoints = 40		# Number of points between high symmetry points
 Setup_params = {}            # Can be used like {'N': ':p,6.0'}, for none use {}
+Total_charge = 0.0       # Total charge. Normally 0.0 for a neutral system.
 
 XC_calc = 'PBE'         # Exchange-Correlation, choose one: LDA, PBE, GLLBSCM, HSE06, HSE03, revPBE, RPBE, PBE0, EXX, B3LYP
 

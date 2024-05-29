@@ -45,6 +45,7 @@ from gpaw.response.bse import BSE
 from gpaw.response.g0w0 import G0W0
 from gpaw.response.gw_bands import GWBands
 from gpaw.dos import DOSCalculator
+from gpaw.utilities.dos import raw_orbital_LDOS
 import numpy as np
 from numpy import genfromtxt
 from elastic import get_elastic_tensor, get_elementary_deformations
@@ -142,6 +143,7 @@ class gpawsolve:
         self.Damping = Damping
         self.Fix_symmetry = Fix_symmetry
         self.Relax_cell = Relax_cell
+        self.Hydrostatic_pressure = Hydrostatic_pressure
         self.Cut_off_energy = Cut_off_energy
         self.Ground_kpts_density = Ground_kpts_density
         self.Ground_kpts_x = Ground_kpts_x
@@ -158,6 +160,7 @@ class gpawsolve:
         self.Mixer_type = Mixer_type
         self.Spin_calc = Spin_calc
         self.Magmom_per_atom = Magmom_per_atom
+        self.Magmom_single_atom = Magmom_single_atom
         self.DOS_npoints = DOS_npoints
         self.DOS_width = DOS_width
         self.DOS_convergence = DOS_convergence
@@ -202,8 +205,13 @@ class gpawsolve:
         self.Opt_cut_of_energy = Opt_cut_of_energy
         self.Opt_nblocks = Opt_nblocks
         self.MPI_cores = MPI_cores
+        self.Localization = Localization
         self.bulk_configuration = bulk_configuration
         self.struct = struct
+        self.dos_xlabel = dos_xlabel
+        self.dos_ylabel = dos_ylabel
+        self.band_ylabel = band_ylabel
+        
 
     def structurecalc(self):
         """
@@ -237,7 +245,11 @@ class gpawsolve:
         time11 = time.time()
         if Mode == 'PW':
             if Spin_calc == True:
-                numm = [Magmom_per_atom]*bulk_configuration.get_global_number_of_atoms()
+                if 'Magmom_single_atom' in globals() and Magmom_single_atom is not None:
+                    numm = [0.0]*bulk_configuration.get_global_number_of_atoms()
+                    numm[Magmom_single_atom[0]] = Magmom_single_atom[1]
+                else:
+                    numm = [Magmom_per_atom]*bulk_configuration.get_global_number_of_atoms()
                 bulk_configuration.set_initial_magnetic_moments(numm)
             if Ground_calc == True:
                 # PW Ground State Calculations
@@ -250,14 +262,14 @@ class gpawsolve:
                         quit()
                 if XC_calc in ['HSE06', 'HSE03','B3LYP', 'PBE0','EXX']:
                     parprint('Starting Hybrid XC calculations...')
-                    if 'Ground_kpts_density' in globals():
+                    if 'Ground_kpts_density' in globals() and Ground_kpts_density is not None:
                         calc = GPAW(mode=PW(ecut=Cut_off_energy, force_complex_dtype=True), xc={'name': XC_calc, 'backend': 'pw'}, nbands='200%',
-                                parallel={'band': 1, 'kpt': 1}, eigensolver=Davidson(niter=1), mixer=Mixer_type,
+                                parallel={'band': 1, 'kpt': 1}, eigensolver=Davidson(niter=1), mixer=Mixer_type, charge=Total_charge,
                                 spinpol=Spin_calc, kpts={'density': Ground_kpts_density, 'gamma': Gamma}, txt=struct+'-1-Log-Ground.txt',
                                 convergence = Ground_convergence, occupations = Occupation)
                     else:
                         calc = GPAW(mode=PW(ecut=Cut_off_energy, force_complex_dtype=True), xc={'name': XC_calc, 'backend': 'pw'}, nbands='200%', 
-                                parallel={'band': 1, 'kpt': 1}, eigensolver=Davidson(niter=1), mixer=Mixer_type,
+                                parallel={'band': 1, 'kpt': 1}, eigensolver=Davidson(niter=1), mixer=Mixer_type, charge=Total_charge,
                                 spinpol=Spin_calc, kpts={'size': (Ground_kpts_x, Ground_kpts_y, Ground_kpts_z), 'gamma': Gamma}, txt=struct+'-1-Log-Ground.txt',
                                 convergence = Ground_convergence, occupations = Occupation)
                 else:
@@ -265,20 +277,23 @@ class gpawsolve:
                     # Fix the spacegroup in the geometric optimization if wanted
                     if Fix_symmetry == True:
                         bulk_configuration.set_constraint(FixSymmetry(bulk_configuration))
-                    if 'Ground_kpts_density' in globals():
+                    if 'Ground_kpts_density' in globals() and Ground_kpts_density is not None:
                         calc = GPAW(mode=PW(ecut=Cut_off_energy, force_complex_dtype=True), xc=XC_calc, nbands='200%', setups= Setup_params, 
                                 parallel={'domain': world.size}, spinpol=Spin_calc, kpts={'density': Ground_kpts_density, 'gamma': Gamma},
-                                mixer=Mixer_type, txt=struct+'-1-Log-Ground.txt',
+                                mixer=Mixer_type, txt=struct+'-1-Log-Ground.txt', charge=Total_charge,
                                 convergence = Ground_convergence, occupations = Occupation)
                     else:
                         calc = GPAW(mode=PW(ecut=Cut_off_energy, force_complex_dtype=True), xc=XC_calc, nbands='200%', setups= Setup_params, 
                                 parallel={'domain': world.size}, spinpol=Spin_calc, kpts={'size': (Ground_kpts_x, Ground_kpts_y, Ground_kpts_z), 'gamma': Gamma},
-                                mixer=Mixer_type, txt=struct+'-1-Log-Ground.txt',
+                                mixer=Mixer_type, txt=struct+'-1-Log-Ground.txt', charge=Total_charge,
                                 convergence = Ground_convergence, occupations = Occupation)
                 bulk_configuration.calc = calc
                 if Geo_optim == True:
                     if True in Relax_cell:
-                        uf = ExpCellFilter(bulk_configuration, mask=Relax_cell)
+                        if Hydrostatic_pressure > 0.0:
+                            uf = ExpCellFilter(bulk_configuration, mask=Relax_cell, hydrostatic_strain=True, scalar_pressure=Hydrostatic_pressure)
+                        else:
+                            uf = ExpCellFilter(bulk_configuration, mask=Relax_cell)
                         # Optimizer Selection
                         if Optimizer == 'FIRE':
                             from ase.optimize.fire import FIRE
@@ -329,16 +344,19 @@ class gpawsolve:
                 # Fix the spacegroup in the geometric optimization if wanted
                 if Fix_symmetry == True:
                     bulk_configuration.set_constraint(FixSymmetry(bulk_configuration))
-                if 'Ground_kpts_density' in globals():
+                if 'Ground_kpts_density' in globals() and Ground_kpts_density is not None:
                     calc = GPAW(mode=PW(Cut_off_energy), xc=XC_calc, parallel={'domain': 1}, kpts={'density': Ground_kpts_density, 'gamma': Gamma},
-                            convergence = Ground_convergence,
+                            convergence = Ground_convergence, charge=Total_charge,
                             mixer=Mixer_type, occupations = Occupation, txt=struct+'-1-Log-Ground.txt')
                 else:
                     calc = GPAW(mode=PW(Cut_off_energy), xc=XC_calc, parallel={'domain': 1}, kpts={'size':(Ground_kpts_x, Ground_kpts_y, Ground_kpts_z), 'gamma': Gamma},
-                            convergence = Ground_convergence,
+                            convergence = Ground_convergence, charge=Total_charge,
                             mixer=Mixer_type, occupations = Occupation, txt=struct+'-1-Log-Ground.txt')
                 bulk_configuration.calc = calc
-                uf = ExpCellFilter(bulk_configuration, mask=Relax_cell)
+                if Hydrostatic_pressure > 0.0:
+                    uf = ExpCellFilter(bulk_configuration, mask=Relax_cell, hydrostatic_strain=True, scalar_pressure=Hydrostatic_pressure)
+                else:
+                    uf = ExpCellFilter(bulk_configuration, mask=Relax_cell)
                 # Optimizer Selection
                 if Optimizer == 'FIRE':
                     from ase.optimize.fire import FIRE
@@ -369,7 +387,7 @@ class gpawsolve:
             # We start by setting up a G0W0 calculator object
             gw = G0W0(struct+'-1-Result-Ground.gpw', filename=struct+'-1-', bands=(GW_valence_band_no, GW_conduction_band_no),
                       method=GW_calc_type,truncation=GW_truncation, nblocksmax=GW_nblocks_max,
-                      maxiter=5, q0_correction=GW_q0_correction,
+                      maxiter=5, q0_correction=GW_q0_correction, charge=Total_charge,
                       mixing=0.5,savepckl=True,
                       ecut=GW_cut_off_energy, ppa=GW_PPA)
             parprint("Starting PW ground state calculation with G0W0 approximation...")
@@ -383,31 +401,35 @@ class gpawsolve:
 
         elif Mode == 'LCAO':
             if Spin_calc == True:
-                numm = [Magmom_per_atom]*bulk_configuration.get_global_number_of_atoms()
+                if 'Magmom_single_atom' in globals() and Magmom_single_atom is not None:
+                    numm = [0.0]*bulk_configuration.get_global_number_of_atoms()
+                    numm[Magmom_single_atom[0]] = Magmom_single_atom[1]
+                else:
+                    numm = [Magmom_per_atom]*bulk_configuration.get_global_number_of_atoms()
                 bulk_configuration.set_initial_magnetic_moments(numm)
             if Ground_calc == True:
                 parprint("Starting LCAO ground state calculation...")
                 # Fix the spacegroup in the geometric optimization if wanted
                 if Fix_symmetry == True:
                     bulk_configuration.set_constraint(FixSymmetry(bulk_configuration))
-                if 'Ground_gpts_density' in globals():
-                    if 'Ground_kpts_density' in globals():
+                if 'Ground_gpts_density' in globals() and Ground_gpts_density is not None:
+                    if 'Ground_kpts_density' in globals() and Ground_kpts_density is not None:
                         calc = GPAW(mode='lcao', basis='dzp', setups= Setup_params, kpts={'density': Ground_kpts_density, 'gamma': Gamma},
                                 convergence = Ground_convergence, h=Ground_gpts_density, spinpol=Spin_calc, txt=struct+'-1-Log-Ground.txt',
-                                mixer=Mixer_type, occupations = Occupation, parallel={'domain': world.size})
+                                mixer=Mixer_type, occupations = Occupation, nbands='200%', parallel={'domain': world.size}, charge=Total_charge)
                     else:
                         calc = GPAW(mode='lcao', basis='dzp', setups= Setup_params, kpts={'size':(Ground_kpts_x, Ground_kpts_y, Ground_kpts_z), 'gamma': Gamma},
                                 convergence = Ground_convergence, h=Ground_gpts_density, spinpol=Spin_calc, txt=struct+'-1-Log-Ground.txt',
-                                mixer=Mixer_type, occupations = Occupation, parallel={'domain': world.size})
+                                mixer=Mixer_type, occupations = Occupation, nbands='200%', parallel={'domain': world.size}, charge=Total_charge)
                 else:
-                    if 'Ground_kpts_density' in globals():
+                    if 'Ground_kpts_density' in globals() and Ground_kpts_density is not None:
                         calc = GPAW(mode='lcao', basis='dzp', setups= Setup_params, kpts={'density': Ground_kpts_density, 'gamma': Gamma},
                                 convergence = Ground_convergence, gpts=(Ground_gpts_x, Ground_gpts_y, Ground_gpts_z), spinpol=Spin_calc, txt=struct+'-1-Log-Ground.txt',
-                                mixer=Mixer_type, occupations = Occupation, parallel={'domain': world.size})
+                                mixer=Mixer_type, occupations = Occupation, nbands='200%', parallel={'domain': world.size}, charge=Total_charge)
                     else:
                         calc = GPAW(mode='lcao', basis='dzp', setups= Setup_params, kpts={'size':(Ground_kpts_x, Ground_kpts_y, Ground_kpts_z), 'gamma': Gamma},
                                 convergence = Ground_convergence, gpts=(Ground_gpts_x, Ground_gpts_y, Ground_gpts_z), spinpol=Spin_calc, txt=struct+'-1-Log-Ground.txt',
-                                mixer=Mixer_type, occupations = Occupation, parallel={'domain': world.size})
+                                mixer=Mixer_type, occupations = Occupation, nbands='200%', parallel={'domain': world.size}, charge=Total_charge)
                 bulk_configuration.calc = calc
                 if Geo_optim == True:
                     if True in Relax_cell:
@@ -479,12 +501,12 @@ class gpawsolve:
         # Start elastic calc
         time151 = time.time()
         parprint('Starting elastic tensor calculations (\033[93mWARNING:\033[0mNOT TESTED FEATURE, PLEASE CONTROL THE RESULTS)...')
-        calc = GPAW(struct+'-1-Result-Ground.gpw', fixdensity=True, txt=struct+'-1.5-Log-Elastic.txt')
+        calc = GPAW(struct+'-1-Result-Ground.gpw').fixed_density(txt=struct+'-1.5-Log-Elastic.txt')
         # Getting space group from SPGlib
         parprint('Spacegroup:',spg.get_spacegroup(bulk_configuration))
         # Calculating equation of state
         parprint('Calculating equation of state...')
-        eos = calculate_eos(bulk_configuration, trajectory=struct+'-1-Result-Ground.traj')
+        eos = calculate_eos(bulk_configuration, trajectory=struct+'-1.5-Result-Elastic.traj')
         v, e, B = eos.fit()
         # Calculating elastic tensor
         parprint('Calculating elastic tensor...')
@@ -534,23 +556,43 @@ class gpawsolve:
         # Start DOS calc
         time21 = time.time()
         parprint("Starting DOS calculation...")
-
-        calc = GPAW(struct+'-1-Result-Ground.gpw', fixdensity=True, txt=struct+'-2-Log-DOS.txt', convergence = DOS_convergence, occupations = Occupation)
-
+        if XC_calc in ['HSE06', 'HSE03','B3LYP', 'PBE0','EXX']:
+            parprint('Passing DOS NSCF calculations...')
+            calc = GPAW().read(filename=struct+'-1-Result-Ground.gpw')
+            ef=0.0 # Can not find the use get_fermi_level() 
+        else:
+            calc = GPAW(struct+'-1-Result-Ground.gpw').fixed_density(txt=struct+'-2-Log-DOS.txt', convergence = DOS_convergence, occupations = Occupation)
+            ef = calc.get_fermi_level()
+        
         chem_sym = bulk_configuration.get_chemical_symbols()
-        ef = calc.get_fermi_level()
+        
 
         if Spin_calc == True:
             #Spin down
 
             # RAW PDOS for spin down
             parprint("Calculating and saving Raw PDOS for spin down...")
-            rawdos = DOSCalculator.from_calculator(filename=struct+'-1-Result-Ground.gpw',soc=False, theta=0.0, phi=0.0, shift_fermi_level=True)
+            if ef==0.0:
+                rawdos = DOSCalculator.from_calculator(filename=struct+'-1-Result-Ground.gpw',soc=False, theta=0.0, phi=0.0, shift_fermi_level=True)
+            else:
+                rawdos = DOSCalculator.from_calculator(filename=struct+'-1-Result-Ground.gpw',soc=False, theta=0.0, phi=0.0, shift_fermi_level=False)
             energies = rawdos.get_energies(npoints=DOS_npoints)
+            # Weights
+            pdossweightsdown = [0.0] * DOS_npoints
+            pdospweightsdown = [0.0] * DOS_npoints
+            pdospxweightsdown = [0.0] * DOS_npoints
+            pdospyweightsdown = [0.0] * DOS_npoints
+            pdospzweightsdown = [0.0] * DOS_npoints
+            pdosdweightsdown = [0.0] * DOS_npoints
+            pdosdxyweightsdown = [0.0] * DOS_npoints
+            pdosdyzweightsdown = [0.0] * DOS_npoints
+            pdosd3z2_r2weightsdown = [0.0] * DOS_npoints
+            pdosdzxweightsdown = [0.0] * DOS_npoints
+            pdosdx2_y2weightsdown = [0.0] * DOS_npoints
+            pdosfweightsdown = [0.0] * DOS_npoints
             totaldosweightsdown = [0.0] * DOS_npoints
-
             # Writing RawPDOS
-            with paropen(struct+'-2-Result-RawPDOS-Down.csv', "w") as fd:
+            with paropen(struct+'-2-Result-RawPDOS-EachAtom-Down.csv', "w") as fd:
                 print("Energy, s-total, p-total, px, py, pz, d-total, dxy, dyz, d3z2_r2, dzx, dx2_y2, f-total, TOTAL", file=fd)
                 for j in range(0, bulk_configuration.get_global_number_of_atoms()):
                     print("Atom no: "+str(j+1)+", Atom Symbol: "+chem_sym[j]+" --------------------", file=fd)
@@ -567,24 +609,60 @@ class gpawsolve:
                     pdosdx2_y2 = rawdos.raw_pdos(energies, a=j, l=2, m=4, spin=0, width=DOS_width)
                     pdosf = rawdos.raw_pdos(energies, a=j, l=3, m=None, spin=0, width=DOS_width)
                     dosspdf = pdoss + pdosp + pdosd + pdosf
+                    # Weights
+                    pdossweightsdown = pdossweightsdown + pdoss
+                    pdospweightsdown = pdospweightsdown + pdosp
+                    pdospxweightsdown = pdospxweightsdown + pdospx
+                    pdospyweightsdown = pdospyweightsdown + pdospy
+                    pdospzweightsdown = pdospzweightsdown + pdospz
+                    pdosdweightsdown = pdosdweightsdown + pdosd
+                    pdosdxyweightsdown = pdosdxyweightsdown + pdosd
+                    pdosdyzweightsdown = pdosdyzweightsdown + pdosd
+                    pdosd3z2_r2weightsdown = pdosd3z2_r2weightsdown + pdosd
+                    pdosdzxweightsdown = pdosdzxweightsdown + pdosd
+                    pdosdx2_y2weightsdown = pdosdx2_y2weightsdown + pdosd
+                    pdosfweightsdown = pdosfweightsdown + pdosf
                     totaldosweightsdown = totaldosweightsdown + dosspdf
                     for x in zip(energies, pdoss, pdosp, pdospx, pdospy, pdospz, pdosd, pdosdxy, pdosdyz, pdosd3z2_r2, pdosdzx, pdosdx2_y2, pdosf, dosspdf):
                         print(*x, sep=", ", file=fd)
 
             # Writing DOS
+            parprint("Saving DOS for spin down...")
             with paropen(struct+'-2-Result-DOS-Down.csv', "w") as fd:
                 for x in zip(energies, totaldosweightsdown):
                     print(*x, sep=", ", file=fd)
+                    
+            # Writing PDOS
+            parprint("Saving PDOS for spin down...")
+            with paropen(struct+'-2-Result-PDOS-Down.csv', "w") as fd:
+                print("Energy, s-total, p-total, px, py, pz, d-total, dxy, dyz, d3z2_r2, dzx, dx2_y2, f-total, TOTAL", file=fd)
+                for x in zip(energies, pdossweightsdown, pdospweightsdown, pdospxweightsdown, pdospyweightsdown, pdospzweightsdown, pdosdweightsdown,
+                             pdosdxyweightsdown, pdosdyzweightsdown, pdosd3z2_r2weightsdown, pdosdzxweightsdown, pdosdx2_y2weightsdown, pdosfweightsdown, totaldosweightsdown):
+                    print(*x, sep=", ", file=fd)
+
             #Spin up
 
             # RAW PDOS for spin up
             parprint("Calculating and saving Raw PDOS for spin up...")
             rawdos = DOSCalculator.from_calculator(struct+'-1-Result-Ground.gpw',soc=False, theta=0.0, phi=0.0, shift_fermi_level=True)
             energies = rawdos.get_energies(npoints=DOS_npoints)
+            # Weights
+            pdossweightsup = [0.0] * DOS_npoints
+            pdospweightsup = [0.0] * DOS_npoints
+            pdospxweightsup = [0.0] * DOS_npoints
+            pdospyweightsup = [0.0] * DOS_npoints
+            pdospzweightsup = [0.0] * DOS_npoints
+            pdosdweightsup = [0.0] * DOS_npoints
+            pdosdxyweightsup = [0.0] * DOS_npoints
+            pdosdyzweightsup = [0.0] * DOS_npoints
+            pdosd3z2_r2weightsup = [0.0] * DOS_npoints
+            pdosdzxweightsup = [0.0] * DOS_npoints
+            pdosdx2_y2weightsup = [0.0] * DOS_npoints
+            pdosfweightsup = [0.0] * DOS_npoints
             totaldosweightsup = [0.0] * DOS_npoints
 
             #Writing RawPDOS
-            with paropen(struct+'-2-Result-RawPDOS-Up.csv', "w") as fd:
+            with paropen(struct+'-2-Result-RawPDOS-EachAtom-Up.csv', "w") as fd:
                 print("Energy, s-total, p-total, px, py, pz, d-total, dxy, dyz, d3z2_r2, dzx, dx2_y2, f-total, TOTAL", file=fd)
                 for j in range(0, bulk_configuration.get_global_number_of_atoms()):
                     print("Atom no: "+str(j+1)+", Atom Symbol: "+chem_sym[j]+" --------------------", file=fd)
@@ -601,13 +679,35 @@ class gpawsolve:
                     pdosdx2_y2 = rawdos.raw_pdos(energies, a=j, l=2, m=4, spin=1, width=DOS_width)
                     pdosf = rawdos.raw_pdos(energies, a=j, l=3, m=None, spin=1, width=DOS_width)
                     dosspdf = pdoss + pdosp + pdosd + pdosf
+                    # Weights
+                    pdossweightsup = pdossweightsup + pdoss
+                    pdospweightsup = pdospweightsup + pdosp
+                    pdospxweightsup = pdospxweightsup + pdospx
+                    pdospyweightsup = pdospyweightsup + pdospy
+                    pdospzweightsup = pdospzweightsup + pdospz
+                    pdosdweightsup = pdosdweightsup + pdosd
+                    pdosdxyweightsup = pdosdxyweightsup + pdosd
+                    pdosdyzweightsup = pdosdyzweightsup + pdosd
+                    pdosd3z2_r2weightsup = pdosd3z2_r2weightsup + pdosd
+                    pdosdzxweightsup = pdosdzxweightsup + pdosd
+                    pdosdx2_y2weightsup = pdosdx2_y2weightsup + pdosd
+                    pdosfweightsup = pdosfweightsup + pdosf
                     totaldosweightsup = totaldosweightsup + dosspdf
                     for x in zip(energies, pdoss, pdosp, pdospx, pdospy, pdospz, pdosd, pdosdxy, pdosdyz, pdosd3z2_r2, pdosdzx, pdosdx2_y2, pdosf, dosspdf):
                         print(*x, sep=", ", file=fd)
 
             # Writing DOS
+            parprint("Saving DOS for spin up...")
             with paropen(struct+'-2-Result-DOS-Up.csv', "w") as fd:
                 for x in zip(energies, totaldosweightsup):
+                    print(*x, sep=", ", file=fd)
+            
+            # Writing PDOS
+            parprint("Saving PDOS for spin up...")
+            with paropen(struct+'-2-Result-PDOS-Up.csv', "w") as fd:
+                print("Energy, s-total, p-total, px, py, pz, d-total, dxy, dyz, d3z2_r2, dzx, dx2_y2, f-total, TOTAL", file=fd)
+                for x in zip(energies, pdossweightsup, pdospweightsup, pdospxweightsup, pdospyweightsup, pdospzweightsup, pdosdweightsup, pdosdxyweightsup, 
+                             pdosdyzweightsup, pdosd3z2_r2weightsup, pdosdzxweightsup, pdosdx2_y2weightsup, pdosfweightsup, totaldosweightsup):
                     print(*x, sep=", ", file=fd)
 
         else:
@@ -617,12 +717,24 @@ class gpawsolve:
             rawdos = DOSCalculator.from_calculator(struct+'-1-Result-Ground.gpw',soc=False, theta=0.0, phi=0.0, shift_fermi_level=True)
             energies = rawdos.get_energies(npoints=DOS_npoints)
             totaldosweights = [0.0] * DOS_npoints
+            pdossweights = [0.0] * DOS_npoints
+            pdospweights = [0.0] * DOS_npoints
+            pdospxweights = [0.0] * DOS_npoints
+            pdospyweights = [0.0] * DOS_npoints
+            pdospzweights = [0.0] * DOS_npoints
+            pdosdweights = [0.0] * DOS_npoints
+            pdosdxyweights = [0.0] * DOS_npoints
+            pdosdyzweights = [0.0] * DOS_npoints
+            pdosd3z2_r2weights = [0.0] * DOS_npoints
+            pdosdzxweights = [0.0] * DOS_npoints
+            pdosdx2_y2weights = [0.0] * DOS_npoints
+            pdosfweights = [0.0] * DOS_npoints
 
             # Writing RawPDOS
-            with paropen(struct+'-2-Result-RawPDOS.csv', "w") as fd:
+            with paropen(struct+'-2-Result-RawPDOS-EachAtom.csv', "w") as fd:
                 print("Energy, s-total, p-total, px, py, pz, d-total, dxy, dyz, d3z2_r2, dzx, dx2_y2, f-total, TOTAL", file=fd)
                 for j in range(0, bulk_configuration.get_global_number_of_atoms()):
-                    print("Atom no: "+str(j+1)+", Atom Symbol: "+chem_sym[j]+" --------------------", file=fd)
+                    print("Atom no: "+str(j+1)+", Atom Symbol: "+chem_sym[j]+" ----------------------------------------", file=fd)
                     pdoss = rawdos.raw_pdos(energies, a=j, l=0, m=None, spin=None, width=DOS_width)
                     pdosp = rawdos.raw_pdos(energies, a=j, l=1, m=None, spin=None, width=DOS_width)
                     pdospx = rawdos.raw_pdos(energies, a=j, l=1, m=2, spin=None, width=DOS_width)
@@ -635,15 +747,38 @@ class gpawsolve:
                     pdosdzx = rawdos.raw_pdos(energies, a=j, l=2, m=3, spin=None, width=DOS_width)
                     pdosdx2_y2 = rawdos.raw_pdos(energies, a=j, l=2, m=4, spin=None, width=DOS_width)
                     pdosf = rawdos.raw_pdos(energies, a=j, l=3, m=None, spin=None, width=DOS_width)
+                    # Weights
                     dosspdf = pdoss + pdosp + pdosd + pdosf
+                    pdossweights = pdossweights + pdoss
+                    pdospweights = pdospweights + pdosp
+                    pdospxweights = pdospxweights + pdospx
+                    pdospyweights = pdospyweights + pdospy
+                    pdospzweights = pdospzweights + pdospz
+                    pdosdweights = pdosdweights + pdosd
+                    pdosdxyweights = pdosdxyweights + pdosd
+                    pdosdyzweights = pdosdyzweights + pdosd
+                    pdosd3z2_r2weights = pdosd3z2_r2weights + pdosd
+                    pdosdzxweights = pdosdzxweights + pdosd
+                    pdosdx2_y2weights = pdosdx2_y2weights + pdosd
+                    pdosfweights = pdosfweights + pdosf
                     totaldosweights = totaldosweights + dosspdf
                     for x in zip(energies, pdoss, pdosp, pdospx, pdospy, pdospz, pdosd, pdosdxy, pdosdyz, pdosd3z2_r2, pdosdzx, pdosdx2_y2, pdosf, dosspdf):
                         print(*x, sep=", ", file=fd)
 
             # Writing DOS
+            parprint("Saving DOS...")
             with paropen(struct+'-2-Result-DOS.csv', "w") as fd:
                 for x in zip(energies, totaldosweights):
                     print(*x, sep=", ", file=fd)
+            
+            # Writing PDOS
+            parprint("Saving PDOS...")
+            with paropen(struct+'-2-Result-PDOS.csv', "w") as fd:
+                print("Energy, s-total, p-total, px, py, pz, d-total, dxy, dyz, d3z2_r2, dzx, dx2_y2, f-total, TOTAL", file=fd)
+                for x in zip(energies, pdossweights, pdospweights, pdospxweights, pdospyweights, pdospzweights, pdosdweights, pdosdxyweights, pdosdyzweights, 
+                             pdosd3z2_r2weights, pdosdzxweights, pdosdx2_y2weights, pdosfweights, totaldosweights):
+                    print(*x, sep=", ", file=fd)
+                    
         # Finish DOS calc
         time22 = time.time()
         # Write timings of calculation
@@ -663,15 +798,15 @@ class gpawsolve:
                     ax = plt.gca()
                     ax.plot(downf[0], -1.0*downf[1], 'y')
                     ax.plot(upf[0], upf[1], 'b')
-                    ax.set_xlabel('Energy [eV]')
-                    ax.set_ylabel('DOS [1/eV]')
+                    ax.set_xlabel(dos_xlabel[Localization])
+                    ax.set_ylabel(dos_ylabel[Localization])
                 else:
                     dosf = pd.read_csv(struct+'-2-Result-DOS.csv', header=None)
                     dosf[0]=dosf[0]+ef
                     ax = plt.gca()
                     ax.plot(dosf[0], dosf[1], 'b')
-                    ax.set_xlabel('Energy [eV]')
-                    ax.set_ylabel('DOS [1/eV]')
+                    ax.set_xlabel(dos_xlabel[Localization])
+                    ax.set_ylabel(dos_ylabel[Localization])
                 plt.xlim(Energy_min+ef, Energy_max+ef)
                 autoscale_y(ax)
                 plt.savefig(struct+'-2-Graph-DOS.png', dpi=300)
@@ -688,15 +823,15 @@ class gpawsolve:
                     ax = plt.gca()
                     ax.plot(downf[0], -1.0*downf[1], 'y')
                     ax.plot(upf[0], upf[1], 'b')
-                    ax.set_xlabel('Energy [eV]')
-                    ax.set_ylabel('DOS [1/eV]')
+                    ax.set_xlabel(dos_xlabel[Localization])
+                    ax.set_ylabel(dos_ylabel[Localization])
                 else:
                     dosf = pd.read_csv(struct+'-2-Result-DOS.csv', header=None)
                     dosf[0]=dosf[0]+ef
                     ax = plt.gca()
                     ax.plot(dosf[0], dosf[1], 'b')
-                    ax.set_xlabel('Energy [eV]')
-                    ax.set_ylabel('DOS [1/eV]')
+                    ax.set_xlabel(dos_xlabel[Localization])
+                    ax.set_ylabel(dos_ylabel[Localization])
                 plt.xlim(Energy_min+ef, Energy_max+ef)
                 autoscale_y(ax)
                 plt.savefig(struct+'-2-Graph-DOS.png', dpi=300)
@@ -716,7 +851,7 @@ class gpawsolve:
         # Start Band calc
         time31 = time.time()
         parprint("Starting band structure calculation...")
-        if Mode == 'PW-GW':      
+        if Mode == 'PW-GW':
             GW = GWBands(calc=struct+'-1-Result-Ground.gpw', fixdensity=True,
                  gw_file=struct+'-1-_results.pckl',kpoints=GW_kpoints_list)
 
@@ -736,24 +871,21 @@ class gpawsolve:
                 print ('Fermi Level: ', ef, end="\n", file=f)
 
         else:
+                        
             if XC_calc in ['HSE06', 'HSE03','B3LYP', 'PBE0','EXX']:
-                calc = GPAW(struct+'-1-Result-Ground.gpw',
-                        parallel={'band': 1, 'kpt': 1}, 
-                        txt=struct+'-3-Log-Band.txt',
-                        symmetry='off', occupations = Occupation,
-                        kpts={'path': Band_path, 'npoints': Band_npoints}, convergence=Band_convergence)
+                calc = GPAW(struct+'-1-Result-Ground.gpw', symmetry='off',kpts={'path': Band_path, 'npoints': Band_npoints},
+                          parallel={'band':1, 'kpt':1}, occupations = Occupation,
+                          txt=struct+'-3-Log-Band.txt', convergence=Band_convergence)
+                ef=0.0
 
             else:
-                calc = GPAW(struct+'-1-Result-Ground.gpw',
-                        txt=struct+'-3-Log-Band.txt',
-                        fixdensity=True,
-                        symmetry='off', occupations = Occupation,
-                        kpts={'path': Band_path, 'npoints': Band_npoints},
-                        convergence=Band_convergence)
+                calc = GPAW(struct+'-1-Result-Ground.gpw').fixed_density(kpts={'path': Band_path, 'npoints': Band_npoints},
+                          txt=struct+'-3-Log-Band.txt', symmetry='off', occupations = Occupation, convergence=Band_convergence)
+                ef = calc.get_fermi_level()
 
             calc.get_potential_energy()
             bs = calc.band_structure()
-            ef = calc.get_fermi_level()
+            
             Band_num_of_bands = calc.get_number_of_bands()
             parprint('Num of bands:'+str(Band_num_of_bands))
 
@@ -850,7 +982,19 @@ class gpawsolve:
                     print("\033[93mWARNING:\033[0m An error occurred during writing XYYY formatted Band file. Mostly, the file is created without any problem.")
                     print(e)
                     pass  # Continue execution after encountering an exception
-
+                
+                # Projected Band
+                Projected_band = False
+                if Projected_band == True:                
+                    with paropen(struct+'-3-Result-ProjectedBand.dat', 'w') as f3:
+                        for i in range(len(sym_ang_mom_i)):
+                            print('----------------------'+sym_ang_mom_i[i]+'---------------------------', end="\n", file=f3)
+                            for n in range(Band_num_of_bands):
+                                for k in range(Band_npoints):
+                                    print(k, projector_weight_skni[0, k, n, i], end="\n", file=f3)
+                                print (end="\n", file=f3)
+                    
+                
         # Finish Band calc
         time32 = time.time()
         # Write timings of calculation
@@ -871,7 +1015,7 @@ class gpawsolve:
                     plt.savefig(struct+'-3-Graph-Band.png', dpi=300)
                     plt.show()
                 else:
-                    bs.plot(filename=struct+'-3-Graph-Band.png', show=True, emax=Energy_max + bs.reference, emin=Energy_min + bs.reference)
+                    bs.plot(filename=struct+'-3-Graph-Band.png', show=True, emax=Energy_max + bs.reference, emin=Energy_min + bs.reference, ylabel=band_ylabel[Localization])
         else:
             # Draw graphs only on master node
             if world.rank == 0:
@@ -885,7 +1029,7 @@ class gpawsolve:
                     plt.savefig(struct+'-3-Graph-Band.png', dpi=300)
                     #plt.show()
                 else:
-                    bs.plot(filename=struct+'-3-Graph-Band.png', show=False, emax=Energy_max + bs.reference, emin=Energy_min + bs.reference)
+                    bs.plot(filename=struct+'-3-Graph-Band.png', show=False, emax=Energy_max + bs.reference, emin=Energy_min + bs.reference, ylabel=band_ylabel[Localization])
 
     def densitycalc(self):
         """
@@ -903,12 +1047,36 @@ class gpawsolve:
         parprint("Starting All-electron density calculation...")
         calc = GPAW(struct+'-1-Result-Ground.gpw', txt=struct+'-4-Log-ElectronDensity.txt')
         bulk_configuration.calc = calc
-        np = calc.get_pseudo_density()
-        n = calc.get_all_electron_density(gridrefinement=Refine_grid)
-
-        # Writing pseudo and all electron densities to cube file with Bohr unit
-        write(struct+'-4-Result-All-electron_nall.cube', bulk_configuration, data=n * Bohr**3)
-        write(struct+'-4-Result-All-electron_npseudo.cube', bulk_configuration, data=np * Bohr**3)
+        if Spin_calc == True:
+            np = calc.get_pseudo_density()
+            n = calc.get_all_electron_density(gridrefinement=Refine_grid)
+            # For spins
+            npdown = calc.get_pseudo_density(spin=0)
+            ndown = calc.get_all_electron_density(spin=0, gridrefinement=Refine_grid)
+            npup = calc.get_pseudo_density(spin=1)
+            nup = calc.get_all_electron_density(spin=1, gridrefinement=Refine_grid)
+            # Zeta
+            nzeta = (nup - ndown) / (nup + ndown)
+            npzeta = (npup - npdown) / (npup + npdown)
+            # Writing spin down pseudo and all electron densities to cube file with Bohr unit
+            write(struct+'-4-Result-All-electron_nall-Down.cube', bulk_configuration, data=ndown * Bohr**3)
+            write(struct+'-4-Result-All-electron_npseudo-Down.cube', bulk_configuration, data=npdown * Bohr**3)
+            # Writing spin up pseudo and all electron densities to cube file with Bohr unit
+            write(struct+'-4-Result-All-electron_nall-Up.cube', bulk_configuration, data=nup * Bohr**3)
+            write(struct+'-4-Result-All-electron_npseudo-Up.cube', bulk_configuration, data=npup * Bohr**3)
+            # Writing total pseudo and all electron densities to cube file with Bohr unit
+            write(struct+'-4-Result-All-electron_nall-Total.cube', bulk_configuration, data=n * Bohr**3)
+            write(struct+'-4-Result-All-electron_npseudo-Total.cube', bulk_configuration, data=np * Bohr**3)
+            # Writing zeta pseudo and all electron densities to cube file with Bohr unit
+            write(struct+'-4-Result-All-electron_nall-Zeta.cube', bulk_configuration, data=nzeta * Bohr**3)
+            write(struct+'-4-Result-All-electron_npseudo-Zeta.cube', bulk_configuration, data=npzeta * Bohr**3)
+        else:
+            np = calc.get_pseudo_density()
+            n = calc.get_all_electron_density(gridrefinement=Refine_grid)
+            # Writing pseudo and all electron densities to cube file with Bohr unit
+            write(struct+'-4-Result-All-electron_nall-Total.cube', bulk_configuration, data=n * Bohr**3)
+            write(struct+'-4-Result-All-electron_npseudo-Total.cube', bulk_configuration, data=np * Bohr**3)
+            
         # Finish Density calc
         time42 = time.time()
         # Write timings of calculation
@@ -1371,6 +1539,62 @@ def convert_atoms_to_phonopy(atoms):
 
 # End of phonon related functions------------------------------
 
+# Projected Band Structure related functions-------------------
+
+def projected_weights(calc):
+    ns = calc.get_number_of_spins()
+    atom_num = calc.atoms.get_atomic_numbers()
+    atoms = calc.atoms
+    
+    # Defining the atoms and angular momentum to project onto.
+    lan = range(58, 72)
+    act = range(90, 104)
+    atom_num = np.asarray(atom_num)
+    ang_mom_a = {}
+    atoms = Atoms(numbers=atom_num)
+    magnetic_elements = {'Sc', 'Ti', 'V', 'Cr', 'Mn', 'Fe', 'Co', 'Ni', 'Cu', 'Zn',
+                'Y', 'Zr', 'Nb', 'Mo', 'Ru', 'Rh', 'Pd', 'Ag', 'Cd', 'In',
+                'Hf', 'Ta', 'W', 'Re', 'Os', 'Ir', 'Pt', 'Au', 'Hg', 'Tl'}
+
+    for a, (z, magn) in enumerate(zip(atom_num, magnetic_elements)):
+        if z in lan or z in act:
+            ang_mom_a[a] = 'spdf'
+        else:
+            ang_mom_a[a] = 'spd' if magn else 'sp'
+
+    # For each unique atom
+    a_x = [a for a in ang_mom_a for ang_mom in ang_mom_a[a]]
+    ang_mom_x = [ang_mom for a in ang_mom_a for ang_mom in ang_mom_a[a]]
+
+    # Get i index for each unique symbol
+    sym_ang_mom_i = []
+    i_x = []
+    for a, ang_mom in zip(a_x, ang_mom_x):
+        symbol = atoms.symbols[a]
+        sym_ang_mom = '.'.join([str(symbol), str(ang_mom)])
+        if sym_ang_mom in sym_ang_mom_i:
+            i = sym_ang_mom_i.index(sym_ang_mom)
+        else:
+            i = len(sym_ang_mom_i)
+            sym_ang_mom_i.append(sym_ang_mom)
+        i_x.append(i)
+
+    nk, nb = len(calc.get_ibz_k_points()), calc.get_number_of_bands()
+    projector_weight_skni = np.zeros((ns, nk, nb, len(sym_ang_mom_i)))
+    ali_x = [(a, ang_mom, i) for (a, ang_mom, i) in zip(a_x, ang_mom_x, i_x)]
+    
+    for _, (a, ang_mom, i) in enumerate(ali_x):
+        # Extract weights
+        for s in range(ns):
+            __, weights = raw_orbital_LDOS(calc, a, s, ang_mom)
+            projector_weight_kn = weights.reshape((nk, nb))
+            projector_weight_kn /= calc.wfs.kd.weight_k[:, np.newaxis]
+            projector_weight_skni[s, :, :, i] += projector_weight_kn
+
+    return projector_weight_skni, sym_ang_mom_i
+
+# End of Projected Band Structure related functions----------------
+
 if __name__ == "__main__":
     #
     # DEFAULT VALUES
@@ -1401,6 +1625,7 @@ if __name__ == "__main__":
     # Which components of strain will be relaxed: EpsX, EpsY, EpsZ, ShearYZ, ShearXZ, ShearXY
     # Example: For a x-y 2D nanosheet only first 2 component will be true
     Relax_cell = [False, False, False, False, False, False]
+    Hydrostatic_pressure = 0.0 # GPa
 
     # GROUND ----------------------
     Cut_off_energy = 340 	# eV
@@ -1419,6 +1644,8 @@ if __name__ == "__main__":
     Mixer_type = MixerSum(0.1, 3, 50) # MixerSum(beta,nmaxold, weight) default:(0.1,3,50), you can try (0.02, 5, 100) and (0.05, 5, 50)
     Spin_calc = False        # Spin polarized calculation?
     Magmom_per_atom = 1.0    # Magnetic moment per atom
+    Magmom_single_atom = None # Magnetic moment for a single atom [atom_no, magmom]
+    Total_charge = 0.0       # Total charge. Normally 0.0 for a neutral system.
 
     # DOS ----------------------
     DOS_npoints = 501                # Number of points
@@ -1478,6 +1705,7 @@ if __name__ == "__main__":
 
     #GENERAL ----------------------
     MPI_cores = 4            # This is for gg.py. Not used in this script.
+    Localization = "en_UK"
 
     # -------------------------------------------------------------
     # Default Bulk Configuration
@@ -1496,16 +1724,33 @@ if __name__ == "__main__":
         cell=[(4.936, 0.0, 0.0), (-2.467999999999999, 4.274701393079989, 0.0), (0.0, 0.0, 20.0)],
         pbc=True,
         )
+    # ------------------ Localization Tables. You can add your language below --------------------------
+    dos_xlabel = dict(en_UK='', tr_TR='')
+    dos_ylabel = dict(en_UK='', tr_TR='')
+    band_ylabel = dict(en_UK='', tr_TR='')
+    
+    # ENGLISH (en_UK) - by S.B. Lisesivdin
+    ## Figures
+    dos_xlabel["en_UK"]='Energy [eV]'
+    dos_ylabel["en_UK"]='DOS [1/eV]'
+    band_ylabel["en_UK"]='Energy [eV]'
 
+    # TURKISH (tr_TR) - by S.B. Lisesivdin
+    ## Figures
+    dos_xlabel["tr_TR"]='Enerji [eV]'
+    dos_ylabel["tr_TR"]='Durum Yoğunluğu [1/eV]'
+    band_ylabel["tr_TR"]='Enerji [eV]'
+    
+    # ------------------ End of Localization Tables --------------------------
+    
     # Version
-    __version__ = "v23.7.1b1"
+    __version__ = "v23.10.1b1"
 
     parser = ArgumentParser(prog ='gpawtools.py', description=Description, formatter_class=RawFormatter)
     parser.add_argument("-i", "--input", dest = "inputfile", help="Use input file for calculation variables (also you can insert geometry)")
     parser.add_argument("-g", "--geometry",dest ="geometryfile", help="Use CIF file for geometry")
     parser.add_argument("-v", "--version", dest="version", action='store_true')
     parser.add_argument("-e", "--energy", dest="energymeas", action='store_true')
-    parser.add_argument("-r", "--restart", dest="restart", action='store_true', help="Deprecated argument for ground state passing. Use Ground_calc instead.")
     parser.add_argument("-d", "--drawfigures", dest="drawfigs", action='store_true', help="Draws DOS and band structure figures at the end of calculation.")
 
     args = None
@@ -1522,7 +1767,6 @@ if __name__ == "__main__":
         quit()
 
     # DEFAULT VALUES
-    restart = False
     energymeas = False
     inFile = None
     drawfigs = False
@@ -1580,10 +1824,6 @@ if __name__ == "__main__":
                 parprint('  uses GPAW '+gpaw.__version__+', ASE '+ase.__version__+' and PHONOPY '+phonopy.__version__)
                 parprint('-----------------------------------------------------------------------------')
                 parprint('No internet connection available.')
-            quit()
-        if args.restart == True:
-            parprint('ATTENTION: -r, --restart argument is depreceted. It was just passing the ground calculations not restarting anything.')
-            parprint('Use Ground_calc == False for passing the ground calculations.')
             quit()
 
 
